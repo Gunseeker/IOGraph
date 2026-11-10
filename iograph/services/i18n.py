@@ -5,6 +5,7 @@ import re
 from PyQt6.QtCore import QLocale
 
 from .settings import AppSettings, SettingsKeys
+from .import_translations import KEYS as IMPORT_KEYS, STRINGS as IMPORT_STRINGS
 
 
 class I18nService:
@@ -181,6 +182,8 @@ class I18nService:
         "language.title": "Language",
         "language.saved_restart_notice": "Language preference saved. Some labels may require app restart to fully apply.",
     }
+
+    _KEY_TO_SOURCE.update(dict(zip(IMPORT_KEYS, IMPORT_STRINGS["en"])))
 
     _OPTIONAL_TRANSLATION_IDS = {
         "update.check.unable_template",
@@ -2248,6 +2251,9 @@ class I18nService:
 
     # Keep locale variants fully localized by inheriting their base dictionaries,
     # then applying variant-specific overrides.
+    for _lang, _strings in IMPORT_STRINGS.items():
+        _EXTRA_TRANSLATIONS.setdefault(_lang, {}).update(zip(IMPORT_STRINGS["en"], _strings))
+
     _TRANSLATIONS["es-ES"] = {**_TRANSLATIONS.get("es-419", {}), **_TRANSLATIONS.get("es-ES", {})}
     _EXTRA_TRANSLATIONS["es-ES"] = {**_EXTRA_TRANSLATIONS.get("es-419", {}), **_EXTRA_TRANSLATIONS.get("es-ES", {})}
     _TRANSLATIONS["pt-PT"] = {**_TRANSLATIONS.get("pt-BR", {}), **_TRANSLATIONS.get("pt-PT", {})}

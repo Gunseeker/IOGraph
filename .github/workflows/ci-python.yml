@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - python-port
+      - feature/load-raw-data
     paths:
       - "iograph/**"
       - "scripts/**"
@@ -57,3 +58,9 @@ jobs:
 
       - name: Smoke regression check
         run: python scripts/smoke_regression.py
+
+      - name: Raw import regression tests
+        run: python -m unittest discover -s scripts -p test_raw_import.py -v
+
+      - name: Translation audit
+        run: python scripts/i18n_missing.py --strict

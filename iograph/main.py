@@ -4,6 +4,7 @@ from math import cos, pi
 import os
 import plistlib
 import subprocess
+from threading import Event
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
@@ -31,6 +32,7 @@ from .core.session_cache_restore import restore_session_caches
 from .core.session_restore_decisions import SessionRestoreDecisions
 from .core.session_storage import SessionStorage
 from .core.export_controller import ExportController
+from .core.raw_import import RawImportWorker
 from .core.tracking_controller import TrackingController
 from .core.update_storage import UpdateStorageManager
 from .core.update_ui_decisions import UpdateUiDecisions
@@ -293,6 +295,7 @@ class MainWindow(QMainWindow):
             on_language_mode_selected=self._on_language_mode_selected,
             on_save_image=self._save_image,
             on_save_csv=self._save_csv,
+            on_load_csv=self._load_csv,
             on_reset=self._reset_canvas,
             on_quit=self._request_quit,
             on_toggle_tracking=lambda: self._set_tracking(not self._canvas.is_tracking()),
@@ -312,6 +315,7 @@ class MainWindow(QMainWindow):
         )
         self._save_image_action = refs.save_image_action
         self._save_csv_action = refs.save_csv_action
+        self._load_csv_action = refs.load_csv_action
         self._reset_action = refs.reset_action
         self._exit_action = refs.exit_action
         self._tracking_toggle_action = refs.tracking_toggle_action
@@ -479,6 +483,78 @@ class MainWindow(QMainWindow):
         csv_path.write_text(self._canvas.export_csv_text(), encoding="utf-8")
         self._status(self._t("save.csv_saved"))
         self._maybe_prompt_support_after_first_raw_save()
+        self._sync_ui_state()
+
+    def _load_csv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, self._t("menu.load_raw_data"), str(self._default_save_dir()),
+            self._t("save.raw.filter_csv"),
+        )
+        if not path:
+            return
+        choice = QMessageBox(self)
+        choice.setWindowTitle(self._t("menu.load_raw_data"))
+        choice.setText(self._t("import.choose"))
+        append = choice.addButton(self._t("import.append"), QMessageBox.ButtonRole.AcceptRole)
+        replace = choice.addButton(self._t("import.replace"), QMessageBox.ButtonRole.DestructiveRole)
+        choice.addButton(QMessageBox.StandardButton.Cancel)
+        choice.setDefaultButton(append)
+        choice.exec()
+        if choice.clickedButton() not in (append, replace):
+            return
+        replacing = choice.clickedButton() == replace
+        if replacing and QMessageBox.question(
+            self, self._t("import.replace"), self._t("import.confirm_replace"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        # Keep tracking normally while the worker validates; commit only on success.
+        cancel = Event()
+        progress = QProgressDialog(self._t("import.loading"), self._t("import.cancel"), 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.canceled.connect(cancel.set)
+        result = []
+        thread = QThread(self)
+        worker = RawImportWorker(path, cancel)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def received(rows, error):
+            result.append((rows, error))
+            progress.accept()
+
+        worker.finished.connect(received)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.start()
+        progress.exec()
+        # Cancellation is cooperative. quit() does not interrupt a running worker.
+        cancel.set()
+        thread.quit()
+        thread.wait()
+        thread.deleteLater()
+        if not result:
+            return
+        rows, error = result[0]
+        if error == "cancelled" or progress.wasCanceled():
+            return
+        if error:
+            QMessageBox.warning(self, self._t("menu.load_raw_data"), self._t("import.failed"))
+            return
+        try:
+            self._canvas.import_raw_samples(rows, replace=replacing)
+        except MemoryError:
+            QMessageBox.warning(self, self._t("menu.load_raw_data"), self._t("import.failed"))
+            return
+        # CSV has no recording dates. Do not invent a historical date range.
+        self._tracking_controller.mark_imported_session()
+        self._preview_active_request_id = -1  # Ignore an older rendering worker.
+        self._request_preview_rerender()
+        self._save_session_state()
+        self._update_timer_label()
         self._sync_ui_state()
 
     def _start_export_worker(self, path: str) -> None:
@@ -667,7 +743,7 @@ class MainWindow(QMainWindow):
         colorful = self._settings.get_bool(SettingsKeys.OPTION_COLORFUL_SCHEME, False)
         use_desktop = self._settings.get_bool(SettingsKeys.OPTION_USE_DESKTOP_BACKGROUND, False)
         use_multi_monitor = self._settings.get_bool(SettingsKeys.OPTION_USE_MULTIPLE_MONITORS, True)
-        auto_update = self._settings.get_bool(SettingsKeys.OPTION_AUTOMATIC_UPDATE, True)
+        auto_update = self._settings.get_bool(SettingsKeys.OPTION_AUTOMATIC_UPDATE, False)
 
         # Apply to runtime first (source of truth), then mirror in UI without signal side-effects.
         self._canvas.set_ignore_mouse_stops(ignore_stops, rebuild=False)
@@ -705,12 +781,15 @@ class MainWindow(QMainWindow):
 
     def _save_session_state(self) -> None:
         signature = self._canvas.render_cache_signature()
-        preview_saved = self._canvas.export_preview_cache(str(self._session_storage.preview_cache_path()))
+        preview_saved = self._preview_render_thread is None and self._canvas.export_preview_cache(
+            str(self._session_storage.preview_cache_path()))
         desktop_saved = self._canvas.export_desktop_background_cache(str(self._session_storage.desktop_cache_path()))
         raw_storage = self._session_storage.write_raw_chunks(self._canvas.export_raw_samples())
         session_times = self._tracking_controller.session_timestamps_payload()
         state = {
             "version": 1,
+            "elapsed_ms": self._canvas.get_elapsed_ms(),
+            "imported_session": self._tracking_controller.has_imported_session,
             "session_started_at": session_times["session_started_at"],
             "session_ended_at": session_times["session_ended_at"],
             "raw_storage": raw_storage,
@@ -733,6 +812,9 @@ class MainWindow(QMainWindow):
         use_desktop_bg = self._use_desktop_action.isChecked()
         if raw_samples:
             self._canvas.load_raw_samples(raw_samples, rebuild=False)
+            self._canvas.restore_elapsed_ms(payload.get("elapsed_ms", self._canvas.get_elapsed_ms()))
+        if payload.get("imported_session"):
+            self._tracking_controller.mark_imported_session()
         cache_restore = restore_session_caches(
             payload=payload,
             use_cache=use_cache,
@@ -1555,6 +1637,7 @@ class MainWindow(QMainWindow):
 
         self._save_image_action.setText(self._t("menu.save_image"))
         self._save_csv_action.setText(self._t("menu.save_raw_data"))
+        self._load_csv_action.setText(self._t("menu.load_raw_data"))
         self._reset_action.setText(self._t("menu.reset"))
         self._exit_action.setText(self._t("menu.exit"))
         self._tracking_reset_action.setText(self._t("menu.reset"))

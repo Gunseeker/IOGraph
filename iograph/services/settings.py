@@ -27,7 +27,7 @@ class SettingsKeys:
 class AppSettings:
     """Thin typed wrapper around QSettings with backward-compatible methods."""
 
-    def __init__(self, organization: str = "iographica", application: str = "IOGraphPython") -> None:
+    def __init__(self, organization: str = "iographica", application: str = "IOGraphRawData") -> None:
         self._settings = QSettings(organization, application)
 
     # Compatibility layer for existing call sites.

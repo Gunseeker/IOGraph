@@ -1,0 +1,32 @@
+name: Build Windows Fork
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller pillow
+      - name: Validate
+        run: |
+          python -m compileall iograph
+          python scripts/smoke_regression.py
+          python scripts/i18n_missing.py --strict
+          python -m unittest discover -s scripts -p test_raw_import.py -v
+      - name: Build fork
+        shell: pwsh
+        run: ./scripts/build_windows.ps1 -Python python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IOGraph-Windows-RawData
+          path: dist/IOGraph-windows-*-raw-data.zip

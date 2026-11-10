@@ -16,6 +16,8 @@ def run_app(window_factory) -> int:
     if sys.platform.startswith("win"):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    # Separate fork data and instance lock from the installed upstream app.
+    app.setApplicationName("IOGraphRawData")
     if sys.platform.startswith("win"):
         if not _acquire_windows_single_instance_lock():
             return 0

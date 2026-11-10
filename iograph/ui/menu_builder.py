@@ -14,6 +14,7 @@ class MenuActionRefs:
     language_menu: object
     save_image_action: object
     save_csv_action: object
+    load_csv_action: object
     reset_action: object
     exit_action: object
     tracking_toggle_action: object
@@ -43,6 +44,7 @@ def build_main_menu(
     on_language_mode_selected,
     on_save_image,
     on_save_csv,
+    on_load_csv,
     on_reset,
     on_quit,
     on_toggle_tracking,
@@ -74,6 +76,11 @@ def build_main_menu(
     save_csv_action.setShortcut("Ctrl+Shift+S")
     save_csv_action.triggered.connect(on_save_csv)
     file_menu.addAction(save_csv_action)
+
+    load_csv_action = QAction(tr("menu.load_raw_data"), parent)
+    load_csv_action.setShortcut("Ctrl+O")
+    load_csv_action.triggered.connect(on_load_csv)
+    file_menu.addAction(load_csv_action)
 
     reset_action = QAction(tr("menu.reset"), parent)
     reset_action.setShortcut("Ctrl+R")
@@ -169,6 +176,7 @@ def build_main_menu(
         language_menu=language_menu,
         save_image_action=save_image_action,
         save_csv_action=save_csv_action,
+        load_csv_action=load_csv_action,
         reset_action=reset_action,
         exit_action=exit_action,
         tracking_toggle_action=tracking_toggle_action,

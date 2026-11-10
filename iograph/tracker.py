@@ -48,6 +48,7 @@ class TrackCanvas(QWidget):
         self._radius: float = 0.0
 
         self._raw_samples: list[tuple[float | None, float | None, int]] = []
+        self._segment_starts: set[int] = set()
         self._accumulated_ms: int = 0
         self._run_started_mono: float | None = None
         self._has_written_first_row = False
@@ -84,6 +85,7 @@ class TrackCanvas(QWidget):
         if self._tracking:
             return
         self._tracking = True
+        self._has_written_first_row = False
         self._prepare_for_update()
         self._run_started_mono = monotonic()
         self._timer.start()
@@ -94,6 +96,11 @@ class TrackCanvas(QWidget):
             self._accumulated_ms += max(0, delta)
         self._run_started_mono = None
         self._last_elapsed_ms = self._accumulated_ms
+        if self._tracking and self._raw_samples and self._raw_samples[-1][2] < self._last_elapsed_ms:
+            if self._raw_samples[-1][0] is None:
+                self._raw_samples[-1] = (None, None, self._last_elapsed_ms)
+            else:
+                self._raw_samples.append((None, None, self._last_elapsed_ms))
         self._tracking = False
         self._timer.stop()
         self.update()
@@ -110,6 +117,7 @@ class TrackCanvas(QWidget):
         if self._preview_pixmap is not None:
             self._preview_pixmap.fill(Qt.GlobalColor.transparent)
         self._raw_samples = []
+        self._segment_starts = set()
         self._accumulated_ms = 0
         self._has_written_first_row = False
         self._last_elapsed_ms = 0
@@ -124,22 +132,52 @@ class TrackCanvas(QWidget):
         self.update()
 
     def export_csv_text(self) -> str:
-        lines = ["x,y,time"]
-        for x, y, t in self._raw_samples:
+        lines = ["x,y,time,segment_start"]
+        for i, (x, y, t) in enumerate(self._raw_samples):
+            marker = "1" if i in self._segment_starts else "0"
             if x is None or y is None:
-                lines.append(f",,{t}")
+                lines.append(f",,{t},{marker}")
             else:
-                lines.append(f"{int(round(x))},{int(round(y))},{t}")
+                lines.append(f"{int(round(x))},{int(round(y))},{t},{marker}")
+        elapsed = self.get_elapsed_ms()
+        if self._raw_samples and elapsed > self._raw_samples[-1][2]:
+            lines.append(f",,{elapsed},0")
         return "\n".join(lines) + "\n"
 
     def export_raw_samples(self) -> list[dict[str, Any]]:
-        return [{"x": x, "y": y, "t": t} for x, y, t in self._raw_samples]
+        return [{"x": x, "y": y, "t": t, "segment_start": i in self._segment_starts}
+                for i, (x, y, t) in enumerate(self._raw_samples)]
+
+    def import_raw_samples(self, rows: list[dict], *, replace: bool = False) -> None:
+        """Commit validated samples. Prepare the combined data before swapping state."""
+        offset = 0 if replace else self.get_elapsed_ms()
+        imported = [(r["x"], r["y"], r["t"] + offset) for r in rows]
+        existing = [] if replace else self._raw_samples
+        if existing and existing[-1][2] < offset:
+            existing = existing + [(None, None, offset)]
+        starts = set() if replace else self._segment_starts.copy()
+        starts.update(len(existing) + i for i, r in enumerate(rows)
+                      if i == 0 or r.get("segment_start"))
+        combined = existing + imported
+        was_tracking = self.is_tracking()
+        self.stop_tracking()
+        self._raw_samples = combined
+        self._segment_starts = starts
+        self._accumulated_ms = combined[-1][2]
+        self._last_elapsed_ms = self._accumulated_ms
+        self._has_written_first_row = False
+        self._radius = 0.0
+        if was_tracking:
+            self.start_tracking()
 
     def load_raw_samples(self, rows: list[dict[str, Any]], rebuild: bool = True) -> None:
         parsed: list[tuple[float | None, float | None, int]] = []
+        starts: set[int] = set()
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            if row.get("segment_start"):
+                starts.add(len(parsed))
             t_raw = row.get("t", 0)
             try:
                 t = int(t_raw)
@@ -157,8 +195,8 @@ class TrackCanvas(QWidget):
                 parsed.append((None, None, max(0, t)))
                 continue
             parsed.append((x, y, max(0, t)))
-        parsed.sort(key=lambda s: s[2])
-        self._raw_samples = self._compact_idle_samples(parsed)
+        self._raw_samples = parsed
+        self._segment_starts = starts
         self._has_written_first_row = len(parsed) > 0
         self._accumulated_ms = parsed[-1][2] if parsed else 0
         self._last_elapsed_ms = self._accumulated_ms
@@ -271,6 +309,7 @@ class TrackCanvas(QWidget):
         bg = self._desktop_background_source.toImage() if self._use_desktop_background and self._desktop_background_source else None
         return {
             "raw_samples": list(self._raw_samples),
+            "segment_starts": set(self._segment_starts),
             "ignore_mouse_stops": self._ignore_mouse_stops,
             "colorful_scheme": self._colorful_scheme,
             "desktop_rect": (
@@ -290,6 +329,7 @@ class TrackCanvas(QWidget):
         bg = self._desktop_background_source.toImage() if self._use_desktop_background and self._desktop_background_source else None
         return {
             "raw_samples": list(self._raw_samples),
+            "segment_starts": set(self._segment_starts),
             "ignore_mouse_stops": self._ignore_mouse_stops,
             "colorful_scheme": self._colorful_scheme,
             "desktop_rect": (
@@ -334,6 +374,7 @@ class TrackCanvas(QWidget):
         timer_interval_ms: int,
         progress_cb: Callable[[QImage], None] | None = None,
         progress_interval_ms: int = 80,
+        segment_starts: set[int] | None = None,
     ) -> None:
         if len(raw_samples) < 2:
             if progress_cb is not None:
@@ -355,18 +396,51 @@ class TrackCanvas(QWidget):
         p = QPainter(image)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            def draw_idle(radius, prev, new):
+                if radius <= cls.RADIUS_THRESHOLD:
+                    return
+                radius = min(radius, (dh * 0.25) ** 2)
+                color = cls._draw_color_for(prev, new, colorful_scheme)
+                halo_d = int(2.0 * radius * scale * s)
+                dot_d = int(2.0 * sqrt(radius) * scale * s)
+                n = 200.0 * max(0.0, 1.0 - 2.0 * sqrt(radius) / cls.RADIUS_THRESHOLD)
+                ch = 0 if colorful_scheme else 255
+                halo = QColor(ch, ch, ch, int(n))
+                cx, cy = map_preview(prev)
+                hx = int(cx - halo_d * 0.5)
+                hy = int(cy - halo_d * 0.5)
+                tx = int(cx - dot_d * 0.5)
+                ty = int(cy - dot_d * 0.5)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(halo)
+                p.drawEllipse(hx, hy, halo_d, halo_d)
+                p.setPen(QPen(color, max(0.0, cls.STROKE_WEIGHT * scale * s)))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(hx, hy, halo_d, halo_d)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color)
+                p.drawEllipse(tx, ty, dot_d, dot_d)
+
             radius = 0.0
-            first = raw_samples[0]
-            if first[0] is None or first[1] is None:
-                return
+            prev = None
+            stop = None
+            prev_t = 0
             if progress_cb is not None:
                 progress_cb(image.copy())
-            prev = (float(first[0]), float(first[1]))
-            stop = prev
-            prev_t = first[2]
             next_emit = monotonic() + max(0.02, progress_interval_ms / 1000.0)
 
-            for i, (x, y, t) in enumerate(raw_samples[1:], start=1):
+            for i, (x, y, t) in enumerate(raw_samples):
+                if i in (segment_starts or ()):
+                    if prev is not None and not ignore_mouse_stops:
+                        draw_idle(radius, prev, prev)
+                    prev = stop = None
+                    radius = 0.0
+                    prev_t = t
+                if prev is None:
+                    prev_t = t
+                    if x is not None and y is not None:
+                        prev = stop = (float(x), float(y))
+                    continue
                 dt = max(0, int(t) - int(prev_t))
                 prev_t = int(t)
                 if x is None or y is None:
@@ -400,34 +474,17 @@ class TrackCanvas(QWidget):
                     else:
                         radius += cls.IDLE_RADIUS_STEP
                 else:
-                    if radius > cls.RADIUS_THRESHOLD:
-                        radius = min(radius, (dh * 0.25) ** 2)
-                        color = cls._draw_color_for(prev, new, colorful_scheme)
-                        halo_d = int(2.0 * radius * scale * s)
-                        dot_d = int(2.0 * sqrt(radius) * scale * s)
-                        n = 200.0 * max(0.0, 1.0 - 2.0 * sqrt(radius) / cls.RADIUS_THRESHOLD)
-                        ch = 0 if colorful_scheme else 255
-                        halo = QColor(ch, ch, ch, int(n))
-                        cx, cy = map_preview(prev)
-                        hx = int(cx - halo_d * 0.5)
-                        hy = int(cy - halo_d * 0.5)
-                        tx = int(cx - dot_d * 0.5)
-                        ty = int(cy - dot_d * 0.5)
-                        p.setPen(Qt.PenStyle.NoPen)
-                        p.setBrush(halo)
-                        p.drawEllipse(hx, hy, halo_d, halo_d)
-                        p.setPen(QPen(color, max(0.0, cls.STROKE_WEIGHT * scale * s)))
-                        p.setBrush(Qt.BrushStyle.NoBrush)
-                        p.drawEllipse(hx, hy, halo_d, halo_d)
-                        p.setPen(Qt.PenStyle.NoPen)
-                        p.setBrush(color)
-                        p.drawEllipse(tx, ty, dot_d, dot_d)
+                    draw_idle(radius, prev, new)
                     stop = new
                     radius = 0.0
                 prev = new
                 if progress_cb is not None and (monotonic() >= next_emit or i == len(raw_samples) - 1):
                     progress_cb(image.copy())
                     next_emit = monotonic() + max(0.02, progress_interval_ms / 1000.0)
+            if prev is not None and not ignore_mouse_stops:
+                draw_idle(radius, prev, prev)
+            if progress_cb is not None:
+                progress_cb(image.copy())
         finally:
             p.end()
 
@@ -440,6 +497,7 @@ class TrackCanvas(QWidget):
         cls._render_raw_on_image(
             image=image,
             raw_samples=state["raw_samples"],
+            segment_starts=state.get("segment_starts"),
             colorful_scheme=state["colorful_scheme"],
             ignore_mouse_stops=state["ignore_mouse_stops"],
             desktop_rect=tuple(state["desktop_rect"]),
@@ -462,6 +520,7 @@ class TrackCanvas(QWidget):
         cls._render_raw_on_image(
             image=image,
             raw_samples=state["raw_samples"],
+            segment_starts=state.get("segment_starts"),
             colorful_scheme=state["colorful_scheme"],
             ignore_mouse_stops=state["ignore_mouse_stops"],
             desktop_rect=tuple(state["desktop_rect"]),
@@ -499,6 +558,7 @@ class TrackCanvas(QWidget):
         cls._render_raw_on_image(
             image=image,
             raw_samples=state["raw_samples"],
+            segment_starts=state.get("segment_starts"),
             colorful_scheme=state["colorful_scheme"],
             ignore_mouse_stops=state["ignore_mouse_stops"],
             desktop_rect=tuple(state["desktop_rect"]),
@@ -623,6 +683,10 @@ class TrackCanvas(QWidget):
             return self._accumulated_ms + max(0, delta)
         return self._last_elapsed_ms
 
+    def restore_elapsed_ms(self, elapsed_ms: int) -> None:
+        self._accumulated_ms = max(self._accumulated_ms, int(elapsed_ms))
+        self._last_elapsed_ms = self._accumulated_ms
+
     # Internal helpers
 
     def _ensure_buffers(self) -> None:
@@ -689,8 +753,13 @@ class TrackCanvas(QWidget):
 
         no_movement = self._prev_p.x == self._new_p.x and self._prev_p.y == self._new_p.y
         if not self._has_written_first_row:
+            self._segment_starts.add(len(self._raw_samples))
             self._raw_samples.append((float(pos.x()), float(pos.y()), dt_ms))
             self._has_written_first_row = True
+            self._prev_p.set_from(self._new_p)
+            self._stop_p.set_from(self._new_p)
+            self._radius = 0.0
+            return
         elif no_movement:
             if self._raw_samples and self._raw_samples[-1][0] is None and self._raw_samples[-1][1] is None:
                 self._raw_samples[-1] = (None, None, dt_ms)
@@ -816,63 +885,12 @@ class TrackCanvas(QWidget):
         self.update()
 
     def _render_raw_on_pixmap(self, pix: QPixmap, map_point, stroke_scale: float) -> None:
-        if not self._raw_samples:
-            self._radius = 0.0
-            self._has_written_first_row = False
-            return
-
-        first_x, first_y, _ = self._raw_samples[0]
-        if first_x is None or first_y is None:
-            return
-
-        radius = 0.0
-        prev = FloatPoint(first_x, first_y)
-        stop = FloatPoint(first_x, first_y)
-
-        prev_t = self._raw_samples[0][2]
-        for x, y, t in self._raw_samples[1:]:
-            dt = max(0, t - prev_t)
-            prev_t = t
-            if x is None or y is None:
-                new_p = FloatPoint(prev.x, prev.y)
-            else:
-                new_p = FloatPoint(x, y)
-
-            no_movement = prev.x == new_p.x and prev.y == new_p.y
-            if not no_movement:
-                c = self._get_draw_color_for(prev, new_p)
-                p0 = map_point(prev)
-                p1 = map_point(new_p)
-                self._draw_line(pix, p0, p1, c, self.STROKE_WEIGHT * stroke_scale)
-
-            if self._ignore_mouse_stops:
-                prev = new_p
-                continue
-
-            dx = new_p.x - stop.x
-            dy = new_p.y - stop.y
-            d = dx * dx + dy * dy
-            if d < self.DELAY_DISTANCE_QUAD:
-                if x is None or y is None:
-                    radius += self.IDLE_RADIUS_STEP * self._idle_ticks_for_delta(dt)
-                else:
-                    radius += self.IDLE_RADIUS_STEP
-            else:
-                if radius > self.RADIUS_THRESHOLD:
-                    max_radius = (self._desktop_rect.height() * 0.25) ** 2
-                    radius = min(radius, max_radius)
-                    c = self._get_draw_color_for(prev, new_p)
-                    self._draw_stop_ellipse(
-                        pix,
-                        map_point(prev),
-                        c,
-                        stroke_scale,
-                        radius=radius,
-                    )
-                stop = FloatPoint(new_p.x, new_p.y)
-                radius = 0.0
-
-            prev = new_p
+        image = self.render_preview_image_from_state(self.snapshot_preview_render_state())
+        painter = QPainter(pix)
+        try:
+            painter.drawImage(QRectF(0, 0, self.width(), self.height()), image)
+        finally:
+            painter.end()
 
     # Painting
 

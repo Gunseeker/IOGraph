@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 
 class UpdateService:
-    RELEASES_URL = "https://api.github.com/repos/anatolyzenkov/IOGraph/releases?per_page=20"
+    RELEASES_URL = "https://api.github.com/repos/Gunseeker/IOGraph/releases?per_page=20"
     USER_AGENT = "IOGraph-Updater"
 
     @classmethod

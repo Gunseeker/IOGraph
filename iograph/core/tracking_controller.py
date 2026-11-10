@@ -39,6 +39,7 @@ class TrackingController(QObject):
     def __init__(self, session: SessionController, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._session = session
+        self.has_imported_session = False
         self._session.tracking_started.connect(self.session_tracking_started)
         self._session.tracking_stopped.connect(self.session_tracking_stopped)
         self._session.session_reset.connect(self.session_reset)
@@ -67,6 +68,7 @@ class TrackingController(QObject):
         return transition
 
     def apply_reset(self, was_tracking: bool) -> None:
+        self.has_imported_session = False
         if was_tracking:
             # Reset while tracking should start a brand new session window.
             self._session.reset()
@@ -101,7 +103,12 @@ class TrackingController(QObject):
         return SessionController.tracking_time_text(elapsed_ms, tr=tr, plural=plural)
 
     def period_label(self, *, tr=lambda s: s, format_time=None, format_date=None) -> str:
+        if self.has_imported_session:
+            return tr("session.time_period")
         return self._session.period_label(tr=tr, format_time=format_time, format_date=format_date)
+
+    def mark_imported_session(self) -> None:
+        self.has_imported_session = True
 
     def export_base_name(
         self,
@@ -112,6 +119,8 @@ class TrackingController(QObject):
         format_time=None,
         format_date=None,
     ) -> str:
+        if self.has_imported_session:
+            return f"{app_name} - {self.tracking_time_text(elapsed_ms, tr=tr)}"
         return self._session.export_base_name(
             elapsed_ms,
             app_name=app_name,
