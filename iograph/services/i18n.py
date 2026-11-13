@@ -6,6 +6,7 @@ from PyQt6.QtCore import QLocale
 
 from .settings import AppSettings, SettingsKeys
 from .import_translations import KEYS as IMPORT_KEYS, STRINGS as IMPORT_STRINGS
+from .recording_translations import KEYS as RECORDING_KEYS, STRINGS as RECORDING_STRINGS
 
 
 class I18nService:
@@ -184,6 +185,7 @@ class I18nService:
     }
 
     _KEY_TO_SOURCE.update(dict(zip(IMPORT_KEYS, IMPORT_STRINGS["en"])))
+    _KEY_TO_SOURCE.update(dict(zip(RECORDING_KEYS, RECORDING_STRINGS["en"])))
 
     _OPTIONAL_TRANSLATION_IDS = {
         "update.check.unable_template",
@@ -2253,6 +2255,8 @@ class I18nService:
     # then applying variant-specific overrides.
     for _lang, _strings in IMPORT_STRINGS.items():
         _EXTRA_TRANSLATIONS.setdefault(_lang, {}).update(zip(IMPORT_STRINGS["en"], _strings))
+    for _lang, _strings in RECORDING_STRINGS.items():
+        _EXTRA_TRANSLATIONS.setdefault(_lang, {}).update(zip(RECORDING_STRINGS["en"], _strings))
 
     _TRANSLATIONS["es-ES"] = {**_TRANSLATIONS.get("es-419", {}), **_TRANSLATIONS.get("es-ES", {})}
     _EXTRA_TRANSLATIONS["es-ES"] = {**_EXTRA_TRANSLATIONS.get("es-419", {}), **_EXTRA_TRANSLATIONS.get("es-ES", {})}

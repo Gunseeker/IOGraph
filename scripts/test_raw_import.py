@@ -217,6 +217,7 @@ class RawImportTests(unittest.TestCase):
              patch.object(SessionStorage, "session_state_path", return_value=session_path):
             window = MainWindow()
             window._canvas.stop_tracking()
+            window._canvas.reset()
             window._canvas.import_raw_samples(self.recording())
 
             def choose_append(box):
@@ -275,7 +276,9 @@ class RawImportTests(unittest.TestCase):
             while window._preview_render_thread is not None:
                 APP.processEvents()
             window._save_session_state()
-            other = MainWindow()
+            # Verify persisted elapsed time independently of startup's live clock.
+            with patch.object(MainWindow, "_set_tracking"):
+                other = MainWindow()
             other._canvas.stop_tracking()
             self.assertEqual(other._canvas.export_raw_samples(), window._canvas.export_raw_samples())
             self.assertEqual(other._canvas.get_elapsed_ms(), 12000)

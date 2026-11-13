@@ -31,8 +31,12 @@ class DesktopSnapshotController:
         self._hide_delay_ms = int(hide_delay_ms)
         self._final_delay_ms = int(final_delay_ms)
         self._restore = _SnapshotRestoreState()
+        self._capturing = False
 
     def refresh(self) -> None:
+        if self._capturing:
+            return
+        self._capturing = True
         # Two-phase hide/capture: handles startup case when window becomes visible after scheduling.
         self._restore.visible = self._window.isVisible()
         self._restore.minimized = self._window.isMinimized()
@@ -55,7 +59,10 @@ class DesktopSnapshotController:
         QTimer.singleShot(self._final_delay_ms, self._capture_final)
 
     def _capture_final(self) -> None:
-        ok = self._capture_desktop_background()
+        try:
+            ok = self._capture_desktop_background()
+        except Exception:
+            ok = False
         if self._restore.visible:
             if self._restore.minimized:
                 self._window.showMinimized()
@@ -66,6 +73,7 @@ class DesktopSnapshotController:
                 self._window.raise_()
                 self._window.activateWindow()
         self._restore.position = None
+        self._capturing = False
         self._on_status(
             self._tr("desktop.snapshot.updated") if ok else self._tr("desktop.snapshot.failed")
         )

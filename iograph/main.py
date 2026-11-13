@@ -4,7 +4,7 @@ from math import cos, pi
 import os
 import plistlib
 import subprocess
-from threading import Event
+from threading import Event, Lock
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
@@ -54,7 +54,7 @@ from .ui.update_actions import sync_install_update_actions
 from .ui.update_status import apply_check_updates_status, check_updates_label
 
 class PreviewRenderWorker(QObject):
-    progress = pyqtSignal(int, object, float)  # request_id, QImage, pixel_scale
+    progress = pyqtSignal()  # At most one queued notification, not a queue of images.
     finished = pyqtSignal(int, object, float)  # request_id, QImage, pixel_scale
     failed = pyqtSignal(str)
 
@@ -62,17 +62,38 @@ class PreviewRenderWorker(QObject):
         super().__init__()
         self._request_id = request_id
         self._state = state
+        self._progress_lock = Lock()
+        self._latest_progress = None
+        self._progress_queued = False
+
+    def publish_progress(self, image: QImage) -> None:
+        with self._progress_lock:
+            self._latest_progress = (self._request_id, image, float(self._state["pixel_scale"]))
+            notify = not self._progress_queued
+            self._progress_queued = True
+        if notify:
+            self.progress.emit()
+
+    def take_progress(self):
+        with self._progress_lock:
+            latest = self._latest_progress
+            self._latest_progress = None
+            self._progress_queued = False
+            return latest
 
     @pyqtSlot()
     def run(self) -> None:
         try:
             image = TrackCanvas.render_preview_image_with_progress(
                 self._state,
-                lambda img: self.progress.emit(self._request_id, img, float(self._state["pixel_scale"])),
+                self.publish_progress,
             )
             self.finished.emit(self._request_id, image, float(self._state["pixel_scale"]))
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            self._state = {}
+            self.take_progress()
 
 
 class ExportRenderWorker(QObject):
@@ -91,6 +112,8 @@ class ExportRenderWorker(QObject):
             self.finished.emit(ok, self._path)
         except Exception:
             self.finished.emit(False, self._path)
+        finally:
+            self._state = {}
 
 
 class MainWindow(QMainWindow):
@@ -135,6 +158,8 @@ class MainWindow(QMainWindow):
         self._tracking_controller.session_reset.connect(lambda: self._signals.session_reset.emit())
         self._tracking_controller.session_restored.connect(lambda: self._signals.session_restored.emit())
         self._session_storage = SessionStorage(self._SESSION_STATE_FILE, self._SESSION_CHUNK_MS)
+        self._session_restore_failed = False
+        self._closing = False
         self._suppress_option_handlers = False
         self._force_quit_requested = False
         self._last_system_dark_mode = False
@@ -171,7 +196,7 @@ class MainWindow(QMainWindow):
         self._last_system_dark_mode = self._is_system_dark_mode()
         style_hints = QGuiApplication.styleHints()
         if hasattr(style_hints, "colorSchemeChanged"):
-            style_hints.colorSchemeChanged.connect(lambda _scheme: self._on_system_color_scheme_changed())
+            style_hints.colorSchemeChanged.connect(self._on_system_color_scheme_changed)
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -179,6 +204,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         self._canvas = TrackCanvas(self)
+        self._canvas.recording_storage_failed.connect(self._on_recording_storage_failed)
         self._desktop_snapshot_controller = DesktopSnapshotController(
             self,
             capture_desktop_background=self._canvas.update_desktop_background,
@@ -274,8 +300,8 @@ class MainWindow(QMainWindow):
         self._ui_timer.start()
         app = QGuiApplication.instance()
         if app is not None:
-            app.screenAdded.connect(lambda screen: self._on_screens_changed())
-            app.screenRemoved.connect(lambda screen: self._on_screens_changed())
+            app.screenAdded.connect(self._on_screens_changed)
+            app.screenRemoved.connect(self._on_screens_changed)
         self._setup_tray()
         self._update_install_update_actions()
         self._refresh_dpi_dependent_icons()
@@ -480,7 +506,11 @@ class MainWindow(QMainWindow):
             return
         csv_path = ExportController.ensure_csv_path(path)
         self._remember_save_dir(csv_path.parent)
-        csv_path.write_text(self._canvas.export_csv_text(), encoding="utf-8")
+        try:
+            self._canvas.write_csv(csv_path)
+        except OSError:
+            QMessageBox.warning(self, "IOGraph", self._t("recording.save_failed"))
+            return
         self._status(self._t("save.csv_saved"))
         self._maybe_prompt_support_after_first_raw_save()
         self._sync_ui_state()
@@ -500,9 +530,11 @@ class MainWindow(QMainWindow):
         choice.addButton(QMessageBox.StandardButton.Cancel)
         choice.setDefaultButton(append)
         choice.exec()
-        if choice.clickedButton() not in (append, replace):
+        clicked = choice.clickedButton()
+        choice.deleteLater()
+        if clicked not in (append, replace):
             return
-        replacing = choice.clickedButton() == replace
+        replacing = clicked == replace
         if replacing and QMessageBox.question(
             self, self._t("import.replace"), self._t("import.confirm_replace"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -536,21 +568,25 @@ class MainWindow(QMainWindow):
         thread.quit()
         thread.wait()
         thread.deleteLater()
+        cancelled = progress.wasCanceled()
+        progress.deleteLater()
         if not result:
             return
         rows, error = result[0]
-        if error == "cancelled" or progress.wasCanceled():
+        if error == "cancelled" or cancelled:
             return
         if error:
             QMessageBox.warning(self, self._t("menu.load_raw_data"), self._t("import.failed"))
             return
         try:
             self._canvas.import_raw_samples(rows, replace=replacing)
-        except MemoryError:
+        except (MemoryError, OSError):
             QMessageBox.warning(self, self._t("menu.load_raw_data"), self._t("import.failed"))
             return
         # CSV has no recording dates. Do not invent a historical date range.
         self._tracking_controller.mark_imported_session()
+        if replacing:
+            self._session_restore_failed = False
         self._preview_active_request_id = -1  # Ignore an older rendering worker.
         self._request_preview_rerender()
         self._save_session_state()
@@ -654,6 +690,8 @@ class MainWindow(QMainWindow):
             self._status(self._t("desktop.background_disabled"))
 
     def _request_preview_rerender(self) -> None:
+        if self._closing:
+            return
         if self._preview_render_thread is not None:
             self._preview_rerender_pending = True
             return
@@ -671,7 +709,7 @@ class MainWindow(QMainWindow):
             request_id=request_id,
             snapshot_state=state,
             worker_cls=PreviewRenderWorker,
-            on_progress=self._on_preview_rerender_progress,
+            on_progress=self._consume_preview_progress,
             on_finished=self._on_preview_rerender_ready,
             on_failed=self._on_preview_rerender_failed,
             on_thread_closed=self._on_preview_thread_closed,
@@ -681,6 +719,12 @@ class MainWindow(QMainWindow):
         self._status(ExportController.preview_rendering_status(tr=self._t))
         thread.start()
 
+    def _consume_preview_progress(self) -> None:
+        worker = self._preview_render_worker
+        latest = worker.take_progress() if worker is not None else None
+        if latest is not None:
+            self._on_preview_rerender_progress(*latest)
+
     def _on_preview_rerender_progress(self, request_id: int, image: QImage, pixel_scale: float) -> None:
         if request_id != self._preview_active_request_id:
             return
@@ -688,15 +732,20 @@ class MainWindow(QMainWindow):
         self._status(ExportController.preview_rendering_status(tr=self._t))
 
     def _on_preview_rerender_ready(self, request_id: int, image: QImage, pixel_scale: float) -> None:
-        if request_id != self._preview_active_request_id:
+        if self._closing or request_id != self._preview_active_request_id:
             return
         if not self._canvas.apply_preview_image(image, pixel_scale):
-            self._canvas.rebuild_from_raw_samples()
+            self._preview_rerender_pending = True
+            return
         self._status(ExportController.preview_rendered_status(tr=self._t))
         self._sync_ui_state()
 
     def _on_preview_rerender_failed(self, _error: str) -> None:
-        self._canvas.rebuild_from_raw_samples()
+        if self._closing:
+            return
+        # Repeating the same failing allocation/I/O synchronously on the GUI
+        # thread can exhaust resources again. Keep the recording and old view.
+        self._status(self._t("recording.preview_failed"))
         self._sync_ui_state()
 
     def _on_preview_thread_closed(self) -> None:
@@ -779,12 +828,32 @@ class MainWindow(QMainWindow):
             sync=True,
         )
 
-    def _save_session_state(self) -> None:
+    def _save_session_state(self) -> bool:
+        if self._session_restore_failed:
+            return True  # Preserve files; the restore warning asks users to export new data.
+        try:
+            self._write_session_state()
+        except (OSError, ValueError):
+            # The cache may describe new data while the previous manifest is
+            # still authoritative. Force reconstruction from its saved samples.
+            try:
+                self._session_storage.preview_cache_path().unlink(missing_ok=True)
+            except OSError:
+                pass
+            QMessageBox.warning(self, "IOGraph", self._t("recording.save_failed"))
+            return False
+        return True
+
+    def _on_recording_storage_failed(self) -> None:
+        self._set_tracking(False)
+        QMessageBox.warning(self, "IOGraph", self._t("recording.storage_failed"))
+
+    def _write_session_state(self) -> None:
         signature = self._canvas.render_cache_signature()
         preview_saved = self._preview_render_thread is None and self._canvas.export_preview_cache(
             str(self._session_storage.preview_cache_path()))
         desktop_saved = self._canvas.export_desktop_background_cache(str(self._session_storage.desktop_cache_path()))
-        raw_storage = self._session_storage.write_raw_chunks(self._canvas.export_raw_samples())
+        raw_storage = self._session_storage.write_raw_chunks(self._canvas.iter_raw_samples())
         session_times = self._tracking_controller.session_timestamps_payload()
         state = {
             "version": 1,
@@ -800,19 +869,29 @@ class MainWindow(QMainWindow):
         self._session_storage.save_state(state)
 
     def _load_session_state(self) -> None:
-        payload = self._session_storage.load_state()
+        try:
+            payload = self._session_storage.load_state()
+        except (OSError, ValueError):
+            self._session_restore_failed = True
+            QMessageBox.warning(self, "IOGraph", self._t("recording.restore_failed"))
+            return
         if payload is None:
             if self._use_desktop_action.isChecked():
                 self._refresh_desktop_snapshot()
             return
 
-        raw_samples = self._session_storage.read_raw_samples(payload)
+        raw_samples = self._session_storage.iter_raw_samples(payload)
         signature = payload.get("render_signature")
         use_cache = signature == self._canvas.render_cache_signature()
         use_desktop_bg = self._use_desktop_action.isChecked()
         if raw_samples:
-            self._canvas.load_raw_samples(raw_samples, rebuild=False)
-            self._canvas.restore_elapsed_ms(payload.get("elapsed_ms", self._canvas.get_elapsed_ms()))
+            try:
+                self._canvas.load_raw_samples(raw_samples, rebuild=False)
+                self._canvas.restore_elapsed_ms(payload.get("elapsed_ms", self._canvas.get_elapsed_ms()))
+            except (OSError, ValueError, OverflowError):
+                self._session_restore_failed = True
+                QMessageBox.warning(self, "IOGraph", self._t("recording.restore_failed"))
+                return
         if payload.get("imported_session"):
             self._tracking_controller.mark_imported_session()
         cache_restore = restore_session_caches(
@@ -837,6 +916,7 @@ class MainWindow(QMainWindow):
             self._update_timer_label()
 
     def _clear_session_state(self) -> None:
+        self._session_restore_failed = False
         self._session_storage.clear_state_files()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -848,9 +928,25 @@ class MainWindow(QMainWindow):
             self._force_quit_requested = False
             event.ignore()
             return
-        self._save_session_state()
+        self._finish_render_workers()
+        if not self._save_session_state():
+            self._closing = False
+            self._force_quit_requested = False
+            event.ignore()
+            return
         self._save_settings()
         super().closeEvent(event)
+
+    def _finish_render_workers(self) -> None:
+        self._closing = True
+        self._preview_rerender_pending = False
+        for thread in (self._preview_render_thread, self._export_thread):
+            if thread is not None:
+                if thread is self._preview_render_thread:
+                    thread.requestInterruption()
+                # Let requested PNG exports finish before destroying their parent.
+                thread.quit()
+                thread.wait()
 
     def _update_timer_label(self) -> None:
         self._refresh_icons_if_system_theme_changed()
@@ -1163,7 +1259,11 @@ class MainWindow(QMainWindow):
             if not self._confirm_exit():
                 self._force_quit_requested = False
                 return
-            self._save_session_state()
+            self._finish_render_workers()
+            if not self._save_session_state():
+                self._closing = False
+                self._force_quit_requested = False
+                return
             self._save_settings()
             tray = getattr(self, "_tray_icon", None)
             if tray is not None:

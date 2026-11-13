@@ -1,0 +1,51 @@
+"""Actionable recording/storage errors, without low-level exception details."""
+KEYS = ("recording.storage_failed", "recording.save_failed", "recording.restore_failed")
+STRINGS = {
+    "en": ("Recording paused because temporary storage is unavailable. Free disk space, then resume.", "Could not save the recording. Check disk space and try again. The previous saved session has been kept.", "Could not restore the complete recording. Saved files have been kept. Export any new recording before resetting or replacing this session."),
+    "de": ("Aufnahme pausiert: Temporärer Speicher ist nicht verfügbar. Speicherplatz freigeben und fortsetzen.", "Aufnahme konnte nicht gespeichert werden. Speicherplatz prüfen und erneut versuchen. Die zuvor gespeicherte Sitzung bleibt erhalten.", "Aufnahme konnte nicht vollständig wiederhergestellt werden. Gespeicherte Dateien bleiben erhalten. Neue Aufnahmen vor dem Zurücksetzen oder Ersetzen exportieren."),
+    "fr": ("Enregistrement en pause : stockage temporaire indisponible. Libérez de l’espace disque puis reprenez.", "Impossible d’enregistrer. Vérifiez l’espace disque et réessayez. La session précédente est conservée.", "Restauration complète impossible. Les fichiers sont conservés. Exportez toute nouvelle capture avant de réinitialiser ou remplacer la session."),
+    "es-419": ("Grabación pausada: almacenamiento temporal no disponible. Libera espacio y reanuda.", "No se pudo guardar. Revisa el espacio disponible e inténtalo de nuevo. Se conservó la sesión anterior.", "No se pudo restaurar toda la grabación. Se conservaron los archivos. Exporta las grabaciones nuevas antes de reiniciar o reemplazar la sesión."),
+    "es-ES": ("Grabación pausada: almacenamiento temporal no disponible. Libera espacio y reanuda.", "No se pudo guardar. Revisa el espacio disponible e inténtalo de nuevo. Se conservó la sesión anterior.", "No se pudo restaurar toda la grabación. Se conservaron los archivos. Exporta las grabaciones nuevas antes de reiniciar o reemplazar la sesión."),
+    "pt-BR": ("Gravação pausada: armazenamento temporário indisponível. Libere espaço e retome.", "Não foi possível salvar. Verifique o espaço e tente novamente. A sessão salva anterior foi mantida.", "Não foi possível restaurar toda a gravação. Os arquivos foram mantidos. Exporte novas gravações antes de reiniciar ou substituir a sessão."),
+    "pt-PT": ("Gravação em pausa: armazenamento temporário indisponível. Liberte espaço e retome.", "Não foi possível guardar. Verifique o espaço e tente novamente. A sessão anterior foi mantida.", "Não foi possível restaurar toda a gravação. Os ficheiros foram mantidos. Exporte novas gravações antes de reiniciar ou substituir a sessão."),
+    "it": ("Registrazione in pausa: spazio temporaneo non disponibile. Libera spazio su disco e riprendi.", "Impossibile salvare. Controlla lo spazio e riprova. La sessione salvata precedente è stata conservata.", "Impossibile ripristinare l’intera registrazione. I file sono stati conservati. Esporta le nuove registrazioni prima di reimpostare o sostituire la sessione."),
+    "ru": ("Запись приостановлена: временное хранилище недоступно. Освободите место и продолжите.", "Не удалось сохранить запись. Проверьте место на диске и повторите. Предыдущий сохранённый сеанс оставлен.", "Не удалось восстановить всю запись. Сохранённые файлы оставлены. Экспортируйте новые записи перед сбросом или заменой сеанса."),
+    "uk": ("Запис призупинено: тимчасове сховище недоступне. Звільніть місце та продовжте.", "Не вдалося зберегти запис. Перевірте місце на диску та повторіть. Попередній збережений сеанс залишено.", "Не вдалося відновити весь запис. Збережені файли залишено. Експортуйте нові записи перед скиданням або заміною сеансу."),
+    "tr": ("Kayıt duraklatıldı: geçici depolama kullanılamıyor. Diskte yer açıp devam edin.", "Kayıt kaydedilemedi. Disk alanını kontrol edip tekrar deneyin. Önceki kayıtlı oturum korundu.", "Kaydın tamamı geri yüklenemedi. Dosyalar korundu. Oturumu sıfırlamadan veya değiştirmeden önce yeni kayıtları dışa aktarın."),
+    "ar": ("تم إيقاف التسجيل مؤقتًا: التخزين المؤقت غير متاح. أفرغ مساحة ثم استأنف.", "تعذر حفظ التسجيل. تحقق من مساحة القرص وحاول مجددًا. تم الاحتفاظ بالجلسة السابقة.", "تعذر استعادة التسجيل بالكامل. تم الاحتفاظ بالملفات. صدّر أي تسجيل جديد قبل إعادة ضبط الجلسة أو استبدالها."),
+    "zh-Hans": ("录制已暂停：临时存储不可用。请释放磁盘空间后继续。", "无法保存记录。请检查磁盘空间后重试。上次保存的会话已保留。", "无法恢复完整记录。已保留保存的文件。请先导出新记录，再重置或替换会话。"),
+    "zh-Hant": ("錄製已暫停：暫存空間無法使用。請釋放磁碟空間後繼續。", "無法儲存記錄。請檢查磁碟空間後重試。上次儲存的工作階段已保留。", "無法還原完整記錄。已保留儲存的檔案。請先匯出新記錄，再重設或取代工作階段。"),
+    "ja": ("一時ストレージを使用できないため記録を一時停止しました。ディスクの空き容量を増やして再開してください。", "記録を保存できませんでした。空き容量を確認して再試行してください。前回保存したセッションは保持されています。", "記録全体を復元できませんでした。保存ファイルは保持されています。セッションをリセットまたは置換する前に新しい記録をエクスポートしてください。"),
+    "kk": ("Жазба кідіртілді: уақытша сақтау орны қолжетімсіз. Дискіде орын босатып, жалғастырыңыз.", "Жазбаны сақтау мүмкін болмады. Дискідегі орынды тексеріп, қайталаңыз. Бұрын сақталған сеанс сақталды.", "Жазбаны толық қалпына келтіру мүмкін болмады. Файлдар сақталды. Сеансты қалпына келтіру немесе ауыстыру алдында жаңа жазбаларды экспорттаңыз."),
+    "sr": ("Снимање је паузирано: привремено складиште није доступно. Ослободите простор и наставите.", "Није могуће сачувати снимак. Проверите простор и покушајте поново. Претходна сачувана сесија је задржана.", "Није могуће вратити цео снимак. Датотеке су задржане. Извезите нове снимке пре ресетовања или замене сесије."),
+    "sv": ("Inspelningen pausad: tillfällig lagring är inte tillgänglig. Frigör diskutrymme och fortsätt.", "Kunde inte spara inspelningen. Kontrollera diskutrymmet och försök igen. Föregående sparade session har behållits.", "Kunde inte återställa hela inspelningen. Filerna har behållits. Exportera nya inspelningar innan du återställer eller ersätter sessionen."),
+    "nl": ("Opname gepauzeerd: tijdelijke opslag is niet beschikbaar. Maak schijfruimte vrij en hervat.", "Kon de opname niet opslaan. Controleer de schijfruimte en probeer opnieuw. De vorige opgeslagen sessie is behouden.", "Kon de volledige opname niet herstellen. De bestanden zijn behouden. Exporteer nieuwe opnamen voordat u de sessie opnieuw instelt of vervangt."),
+    "pl": ("Nagrywanie wstrzymane: pamięć tymczasowa jest niedostępna. Zwolnij miejsce na dysku i wznów.", "Nie udało się zapisać nagrania. Sprawdź miejsce i spróbuj ponownie. Poprzednia zapisana sesja została zachowana.", "Nie udało się przywrócić całego nagrania. Pliki zostały zachowane. Wyeksportuj nowe nagrania przed resetowaniem lub zastąpieniem sesji."),
+    "el": ("Η καταγραφή τέθηκε σε παύση: ο προσωρινός χώρος δεν είναι διαθέσιμος. Ελευθερώστε χώρο και συνεχίστε.", "Δεν ήταν δυνατή η αποθήκευση. Ελέγξτε τον χώρο και δοκιμάστε ξανά. Η προηγούμενη αποθηκευμένη συνεδρία διατηρήθηκε.", "Δεν ήταν δυνατή η πλήρης επαναφορά. Τα αρχεία διατηρήθηκαν. Εξαγάγετε τις νέες καταγραφές πριν επαναφέρετε ή αντικαταστήσετε τη συνεδρία."),
+}
+
+_PREVIEW = {
+    "en": "Could not render the preview. Your recording has been kept.",
+    "de": "Vorschau konnte nicht erstellt werden. Die Aufnahme bleibt erhalten.",
+    "fr": "Impossible de générer l’aperçu. Votre enregistrement est conservé.",
+    "es-419": "No se pudo generar la vista previa. Se conservó la grabación.",
+    "es-ES": "No se pudo generar la vista previa. Se conservó la grabación.",
+    "pt-BR": "Não foi possível gerar a prévia. A gravação foi mantida.",
+    "pt-PT": "Não foi possível gerar a pré-visualização. A gravação foi mantida.",
+    "it": "Impossibile generare l’anteprima. La registrazione è stata conservata.",
+    "ru": "Не удалось построить предпросмотр. Запись сохранена.",
+    "uk": "Не вдалося створити попередній перегляд. Запис збережено.",
+    "tr": "Önizleme oluşturulamadı. Kayıt korundu.",
+    "ar": "تعذر عرض المعاينة. تم الاحتفاظ بالتسجيل.",
+    "zh-Hans": "无法生成预览。记录已保留。",
+    "zh-Hant": "無法產生預覽。記錄已保留。",
+    "ja": "プレビューを生成できませんでした。記録は保持されています。",
+    "kk": "Алдын ала көріністі жасау мүмкін болмады. Жазба сақталды.",
+    "sr": "Није могуће направити преглед. Снимак је сачуван.",
+    "sv": "Kunde inte skapa förhandsvisningen. Inspelningen har behållits.",
+    "nl": "Kon het voorbeeld niet weergeven. De opname is behouden.",
+    "pl": "Nie udało się utworzyć podglądu. Nagranie zostało zachowane.",
+    "el": "Δεν ήταν δυνατή η δημιουργία προεπισκόπησης. Η καταγραφή διατηρήθηκε.",
+}
+KEYS += ("recording.preview_failed",)
+STRINGS = {language: values + (_PREVIEW[language],) for language, values in STRINGS.items()}

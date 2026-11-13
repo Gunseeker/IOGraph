@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import atan2, pi, sqrt
 from time import monotonic
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+import os
 import sys
 from typing import Any, Callable
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, QTimer, Qt
+from PyQt6.QtCore import QPointF, QRect, QRectF, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QColorSpace, QCursor, QGuiApplication, QImage, QPainter, QPaintEvent, QPen, QPixmap
 from PyQt6.QtWidgets import QWidget
+from .core.sample_store import SampleStore
 
 
 @dataclass
@@ -22,6 +27,7 @@ class FloatPoint:
 
 
 class TrackCanvas(QWidget):
+    recording_storage_failed = pyqtSignal()
     # Java parity: Drawer constants
     STROKE_WEIGHT = 0.45
     RADIUS_THRESHOLD = 20.0
@@ -47,7 +53,7 @@ class TrackCanvas(QWidget):
         self._stop_p = FloatPoint(0.0, 0.0)
         self._radius: float = 0.0
 
-        self._raw_samples: list[tuple[float | None, float | None, int]] = []
+        self._raw_samples = SampleStore()
         self._segment_starts: set[int] = set()
         self._accumulated_ms: int = 0
         self._run_started_mono: float | None = None
@@ -116,7 +122,7 @@ class TrackCanvas(QWidget):
         self._ensure_buffers()
         if self._preview_pixmap is not None:
             self._preview_pixmap.fill(Qt.GlobalColor.transparent)
-        self._raw_samples = []
+        self._raw_samples = SampleStore()
         self._segment_starts = set()
         self._accumulated_ms = 0
         self._has_written_first_row = False
@@ -132,33 +138,56 @@ class TrackCanvas(QWidget):
         self.update()
 
     def export_csv_text(self) -> str:
-        lines = ["x,y,time,segment_start"]
+        return "".join(self.iter_csv_lines())
+
+    def iter_csv_lines(self):
+        yield "x,y,time,segment_start\n"
         for i, (x, y, t) in enumerate(self._raw_samples):
             marker = "1" if i in self._segment_starts else "0"
             if x is None or y is None:
-                lines.append(f",,{t},{marker}")
+                yield f",,{t},{marker}\n"
             else:
-                lines.append(f"{int(round(x))},{int(round(y))},{t},{marker}")
+                yield f"{int(round(x))},{int(round(y))},{t},{marker}\n"
         elapsed = self.get_elapsed_ms()
         if self._raw_samples and elapsed > self._raw_samples[-1][2]:
-            lines.append(f",,{elapsed},0")
-        return "\n".join(lines) + "\n"
+            yield f",,{elapsed},0\n"
+
+    def write_csv(self, path: str | Path) -> None:
+        path = Path(path)
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent,
+                                    prefix=path.name + ".", suffix=".tmp", delete=False) as output:
+                temporary = Path(output.name)
+                output.writelines(self.iter_csv_lines())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def export_raw_samples(self) -> list[dict[str, Any]]:
-        return [{"x": x, "y": y, "t": t, "segment_start": i in self._segment_starts}
-                for i, (x, y, t) in enumerate(self._raw_samples)]
+        # Compatibility API for callers that explicitly need an in-memory list.
+        return list(self.iter_raw_samples())
 
-    def import_raw_samples(self, rows: list[dict], *, replace: bool = False) -> None:
+    def iter_raw_samples(self):
+        for i, (x, y, t) in enumerate(self._raw_samples):
+            yield {"x": x, "y": y, "t": t, "segment_start": i in self._segment_starts}
+
+    def import_raw_samples(self, rows: Iterable[dict], *, replace: bool = False) -> None:
         """Commit validated samples. Prepare the combined data before swapping state."""
         offset = 0 if replace else self.get_elapsed_ms()
-        imported = [(r["x"], r["y"], r["t"] + offset) for r in rows]
-        existing = [] if replace else self._raw_samples
-        if existing and existing[-1][2] < offset:
-            existing = existing + [(None, None, offset)]
+        combined = SampleStore()
+        if not replace:
+            combined.extend(self._raw_samples)
+        if combined and combined[-1][2] < offset:
+            combined.append((None, None, offset))
         starts = set() if replace else self._segment_starts.copy()
-        starts.update(len(existing) + i for i, r in enumerate(rows)
-                      if i == 0 or r.get("segment_start"))
-        combined = existing + imported
+        for i, row in enumerate(rows):
+            if i == 0 or row.get("segment_start"):
+                starts.add(len(combined))
+            combined.append((row["x"], row["y"], row["t"] + offset))
+        if not combined:
+            raise ValueError("Empty recording")
         was_tracking = self.is_tracking()
         self.stop_tracking()
         self._raw_samples = combined
@@ -170,8 +199,8 @@ class TrackCanvas(QWidget):
         if was_tracking:
             self.start_tracking()
 
-    def load_raw_samples(self, rows: list[dict[str, Any]], rebuild: bool = True) -> None:
-        parsed: list[tuple[float | None, float | None, int]] = []
+    def load_raw_samples(self, rows: Iterable[dict[str, Any]], rebuild: bool = True) -> None:
+        parsed = SampleStore()
         starts: set[int] = set()
         for row in rows:
             if not isinstance(row, dict):
@@ -308,7 +337,7 @@ class TrackCanvas(QWidget):
         self._ensure_buffers()
         bg = self._desktop_background_source.toImage() if self._use_desktop_background and self._desktop_background_source else None
         return {
-            "raw_samples": list(self._raw_samples),
+            "raw_samples": self._raw_samples.snapshot(),
             "segment_starts": set(self._segment_starts),
             "ignore_mouse_stops": self._ignore_mouse_stops,
             "colorful_scheme": self._colorful_scheme,
@@ -328,7 +357,7 @@ class TrackCanvas(QWidget):
         self._ensure_buffers()
         bg = self._desktop_background_source.toImage() if self._use_desktop_background and self._desktop_background_source else None
         return {
-            "raw_samples": list(self._raw_samples),
+            "raw_samples": self._raw_samples.snapshot(),
             "segment_starts": set(self._segment_starts),
             "ignore_mouse_stops": self._ignore_mouse_stops,
             "colorful_scheme": self._colorful_scheme,
@@ -365,7 +394,7 @@ class TrackCanvas(QWidget):
     def _render_raw_on_image(
         cls,
         image: QImage,
-        raw_samples: list[tuple[float | None, float | None, int]],
+        raw_samples: Sequence[tuple[float | None, float | None, int]],
         colorful_scheme: bool,
         ignore_mouse_stops: bool,
         desktop_rect: tuple[int, int, int, int],
@@ -430,6 +459,8 @@ class TrackCanvas(QWidget):
             next_emit = monotonic() + max(0.02, progress_interval_ms / 1000.0)
 
             for i, (x, y, t) in enumerate(raw_samples):
+                if i % 4096 == 0 and QThread.currentThread().isInterruptionRequested():
+                    raise InterruptedError("Rendering cancelled during shutdown")
                 if i in (segment_starts or ()):
                     if prev is not None and not ignore_mouse_stops:
                         draw_idle(radius, prev, prev)
@@ -610,6 +641,8 @@ class TrackCanvas(QWidget):
 
     def set_use_desktop_background(self, value: bool) -> None:
         self._use_desktop_background = value
+        if not value:
+            self._desktop_background_source = None
         self.update()
 
     def set_use_multiple_monitors(self, value: bool, rebuild: bool = True) -> None:
@@ -734,6 +767,19 @@ class TrackCanvas(QWidget):
         self._stop_p.set_from(self._new_p)
 
     def _on_tick(self) -> None:
+        try:
+            self._record_tick()
+        except (OSError, OverflowError):
+            # Retain every committed sample; avoid an unhandled exception in a
+            # Qt timer callback when temporary storage becomes unavailable.
+            elapsed = self.get_elapsed_ms()
+            self._timer.stop()
+            self._tracking = False
+            self._run_started_mono = None
+            self._accumulated_ms = self._last_elapsed_ms = elapsed
+            self.recording_storage_failed.emit()
+
+    def _record_tick(self) -> None:
         if not self._tracking:
             return
         if self._run_started_mono is None:

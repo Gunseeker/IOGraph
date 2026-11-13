@@ -7,16 +7,17 @@ from pathlib import Path
 from threading import Event
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from .sample_store import RawRecording
 
 
 class ImportCancelled(Exception):
     pass
 
 
-def read_raw_csv(path: str | Path, cancel: Event | None = None) -> list[dict]:
+def read_raw_csv(path: str | Path, cancel: Event | None = None) -> RawRecording:
     # Bound memory use rather than letting an untrusted file exhaust the process.
     max_rows = 2_000_000
-    rows: list[dict] = []
+    rows = RawRecording()
     previous_t = -1
     if Path(path).stat().st_size > 256 * 1024 * 1024:
         raise ValueError("File exceeds 256 MiB")
@@ -58,7 +59,7 @@ def read_raw_csv(path: str | Path, cancel: Event | None = None) -> list[dict]:
                 row["segment_start"] = True
             rows.append(row)
             previous_t = t
-    if not rows or not any(row["x"] is not None for row in rows):
+    if not rows or not rows.has_position:
         raise ValueError("No mouse positions")
     return rows
 
